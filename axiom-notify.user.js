@@ -32,38 +32,72 @@
     }
   }
 
-  // Pull wallet / action / token / amount / market cap out of a toast's rendered text.
-  // Deliberately avoids brittle Tailwind class selectors (arbitrary-value classes
-  // need CSS.escape gymnastics and change often); relies on the two-line text layout instead.
+  // Pull wallet / action / token / amount / market cap directly out of the toast's DOM.
+  // Regexing toastEl.innerText is brittle: wallet names can contain spaces ("kolscan guy #2"),
+  // and Axiom sometimes emits adjacent spans with no whitespace between them in the markup
+  // (e.g. "bought more"+"OS" -> innerText "bought moreOS"), which breaks word-boundary regexes.
+  // Instead we key off the two semantic color classes Axiom uses for buy/sell ("text-increase" /
+  // "text-decrease"): the first marks the action word, the second marks the SOL amount. Everything
+  // else is read positionally off of those two anchor elements, so exact spacing never matters.
   function parseToast(toastEl) {
-    const lines = toastEl.innerText
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const markers = toastEl.querySelectorAll('.text-increase, .text-decrease');
+    if (markers.length < 2) return null;
 
-    if (lines.length < 2) return null;
+    const actionEl = markers[0];
+    const amountEl = markers[1];
 
-    // Line 1 example: "👻 decu sold all anon"
-    const line1 = lines[0].replace(/^[^\w]+/, '').trim(); // strip leading emoji
-    const actionMatch = line1.match(/^(\S+)\s+(bought more|bought|sold all|sold half|sold some|sold)\s+(.+)$/i);
-    if (!actionMatch) return null;
-    const [, wallet, action, token] = actionMatch;
+    const action = actionEl.textContent.trim().toLowerCase();
+    if (!action) return null;
 
-    // Line 2 example: "2.186 at $7.68K MC"
-    const mcMatch = lines[1].match(/^([\d.,]+[KMBkmb]?)\s+at\s+\$([\d.,]+[KMBkmb]?)\s+MC/i);
-    if (!mcMatch) return null;
-    const [, amount, marketCap] = mcMatch;
+    // Token is the element right after the action span (e.g. <span class="ml-[2px]">OS</span>).
+    const tokenEl = actionEl.nextElementSibling;
+    const token = tokenEl ? tokenEl.textContent.trim() : '';
+    if (!token) return null;
 
-    return { wallet, action: action.toLowerCase(), token, amount, marketCap };
+    // Wallet is whatever text sits between the leading emoji icon and the action span.
+    const line1 = actionEl.parentElement;
+    let wallet = '';
+    if (line1) {
+      for (const node of line1.childNodes) {
+        if (node === actionEl) break;
+        if (node === line1.firstChild) continue; // skip the leading emoji/icon span
+        wallet += node.textContent;
+      }
+    }
+    wallet = wallet.trim();
+    if (!wallet) return null;
+
+    const amount = amountEl.textContent.trim();
+    if (!amount) return null;
+
+    // Market cap lives in a sibling span of the amount, formatted like "$461K".
+    let marketCap = '';
+    const line2 = amountEl.parentElement;
+    if (line2) {
+      for (const span of line2.querySelectorAll('span')) {
+        const text = span.textContent.trim();
+        const mcMatch = text.match(/^\$([\d.,]+[KMBkmb]?)$/);
+        if (mcMatch) {
+          marketCap = mcMatch[1];
+          break;
+        }
+      }
+    }
+    if (!marketCap) return null;
+
+    return { wallet, action, token, amount, marketCap };
   }
 
-  function handleToast(toastEl) {
+function handleToast(toastEl) {
     if (seen.has(toastEl)) return;
     seen.add(toastEl);
 
     const info = parseToast(toastEl);
     if (!info) {
       console.warn('[axiom-toast-notifier] could not parse toast', toastEl);
+      Array.from(toastEl.children).forEach((child, i) => {
+        console.warn(`[axiom-toast-notifier] child ${i}:\n${child.outerHTML}`);
+      });
       return;
     }
 
@@ -74,7 +108,6 @@
 
     notify(title, body);
   }
-
   function scanNode(node) {
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     if (node.classList && node.classList.contains('animate-enter')) {
